@@ -177,23 +177,28 @@ async function getRouteWeather(req, res, next) {
         destLon: destInfo.longitude
       });
 
-      // 5B. Secondary Engine: Reverse geocoding on sampled points for fallback/gap discovery
-      const sampledCoords = sampleRouteGeometry(polylinePoints, config.routeSampleDistanceKm);
-      const revGeocodeConcurrency = 4;
+      // 5B. Secondary Engine: Reverse geocoding on sampled points for fallback/gap discovery (only if canonical database lacks candidates)
+      let externalRawCandidates = [];
+      if (canonicalCandidates.length < 2) {
+        const sampledCoords = sampleRouteGeometry(polylinePoints, config.routeSampleDistanceKm);
+        const revGeocodeConcurrency = 3;
 
-      const [bdcResults, photonResults, nomResults, overpassResults] = await Promise.all([
-        mapWithConcurrency(sampledCoords, revGeocodeConcurrency, s => reverseGeocodeBigDataCloud(s.latitude, s.longitude)),
-        mapWithConcurrency(sampledCoords, revGeocodeConcurrency, s => reverseGeocodePhoton(s.latitude, s.longitude)),
-        mapWithConcurrency(sampledCoords, revGeocodeConcurrency, s => reverseGeocodeNominatim(s.latitude, s.longitude)),
-        queryOverpassCorridor(polylinePoints)
-      ]);
+        const timeoutPromise = new Promise(resolve => setTimeout(() => resolve([[], [], [], []]), 2000));
+        const fetchPromise = Promise.all([
+          mapWithConcurrency(sampledCoords, revGeocodeConcurrency, s => reverseGeocodeBigDataCloud(s.latitude, s.longitude)),
+          mapWithConcurrency(sampledCoords, revGeocodeConcurrency, s => reverseGeocodePhoton(s.latitude, s.longitude)),
+          mapWithConcurrency(sampledCoords, revGeocodeConcurrency, s => reverseGeocodeNominatim(s.latitude, s.longitude)),
+          queryOverpassCorridor(polylinePoints)
+        ]);
 
-      const externalRawCandidates = [
-        ...bdcResults.flat().filter(Boolean),
-        ...photonResults.flat().filter(Boolean),
-        ...nomResults.flat().filter(Boolean),
-        ...overpassResults.filter(Boolean)
-      ];
+        const [bdcResults, photonResults, nomResults, overpassResults] = await Promise.race([fetchPromise, timeoutPromise]);
+        externalRawCandidates = [
+          ...(bdcResults || []).flat().filter(Boolean),
+          ...(photonResults || []).flat().filter(Boolean),
+          ...(nomResults || []).flat().filter(Boolean),
+          ...(overpassResults || []).filter(Boolean)
+        ];
+      }
 
       // 5C. Combine & Canonicalize all discovery candidates
       const marginKm = Math.min(8.0, totalDistanceKm * 0.05);
